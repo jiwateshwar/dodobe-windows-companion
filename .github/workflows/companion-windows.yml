@@ -3,8 +3,8 @@
 #   2. the tray app frozen with PyInstaller, packaged with Inno Setup;
 #   3. the installer run silently: files, Start menu, start-at-sign-in entry, the app starting and
 #      staying up; then uninstalled silently, and checked that it all went.
-# A v* tag publishes the installer to the public jiwateshwar/dodobe-companion-releases (the code stays
-# private); every run also keeps it as an artifact.
+# A v* tag publishes the installer as a release of this (public) repository, which Dodobe's Downloads
+# page links to; every run also keeps it as an artifact.
 name: Companion installer (Windows)
 
 on:
@@ -15,7 +15,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read  # the release goes to the public releases repository, with RELEASES_TOKEN
+  contents: write  # the release on v* tags
 
 jobs:
   build:
@@ -113,19 +113,15 @@ jobs:
           if (Test-Path install.log) { Get-Content install.log -Tail 40 }
           if (Test-Path "$env:LOCALAPPDATA\dodobe-companion\companion.log") { Get-Content "$env:LOCALAPPDATA\dodobe-companion\companion.log" }
 
-      # The code stays private; the installer is published to the public releases-only repository, which
-      # Dodobe's Downloads page links to. RELEASES_TOKEN: a fine-grained token with "Contents: Read and
-      # write" on jiwateshwar/dodobe-companion-releases only.
       - name: Publish the release (v* tags)
         if: github.ref_type == 'tag'
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if (-not $env:GH_TOKEN) { throw "the RELEASES_TOKEN secret isn't set: the installer can't be published" }
           $setup = (Get-ChildItem Output\*.exe | Select-Object -First 1).FullName
-          gh release create "${{ github.ref_name }}" "$setup" --repo "jiwateshwar/dodobe-companion-releases" `
+          gh release create "${{ github.ref_name }}" "$setup" --repo "${{ github.repository }}" `
             --title "dodobe companion ${{ github.ref_name }}" `
-            --notes "Windows installer for the dodobe companion tray app (Windows 10/11, x64; no admin rights needed). Run it, enter your Dodobe name and password, press Find folders, and tick the network folders to keep as drives."
+            --notes "Windows installer for the dodobe companion tray app (Windows 10/11, x64; no admin rights needed). Run it, enter your Dodobe name and password, press Find folders, and tick the network folders to keep as drives. Built and tested by this run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       # Also kept as the run's artifact for 30 days (best effort: the account's artifact storage can be full).
       - uses: actions/upload-artifact@v5
