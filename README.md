@@ -70,9 +70,11 @@ tests/windows_smb_test.py   Windows only (CI): maps a real SMB share on the runn
 
 ## Building
 
-The installer is built on Windows by GitHub Actions (`.github/workflows/companion-windows.yml`,
-"Companion installer (Windows)": run it by hand or push to `main`) and saved as the run's artifact
-`dodobe-companion-setup-<version>.exe`. On a Windows PC with Python 3.12+ and Inno Setup 6:
+The installer is built and tested on Windows by GitHub Actions (`.github/workflows/companion-windows.yml`,
+"Companion installer (Windows)") on every push. The run maps a real SMB share on the runner and
+installs, starts, updates and uninstalls the app silently. **To release a version:** push a tag such
+as `v1.0.1`. The run publishes `dodobe-companion-setup-<version>.exe` on the repo's Releases page, and
+that file is the one to give people. On a Windows PC with Python 3.12+ and Inno Setup 6, you can also run
 `companion\build.ps1`. To try it without building:
 `py -3 -m pip install -r companion\requirements.txt` then `pyw -3 companion\dodobe_companion.pyw`.
 

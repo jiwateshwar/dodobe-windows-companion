@@ -3,7 +3,7 @@
 #   2. the tray app frozen with PyInstaller, packaged with Inno Setup;
 #   3. the installer run silently: files, Start menu, start-at-sign-in entry, the app starting and
 #      staying up; then uninstalled silently, and checked that it all went.
-# The installer is this run's artifact; a v* tag also publishes it as a GitHub release.
+# A v* tag publishes the installer as a GitHub release; every run also keeps it as an artifact.
 name: Companion installer (Windows)
 
 on:
@@ -14,7 +14,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write  # the release on v* tags
 
 jobs:
   build:
@@ -23,8 +23,8 @@ jobs:
       run:
         working-directory: companion
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Version
@@ -112,27 +112,20 @@ jobs:
           if (Test-Path install.log) { Get-Content install.log -Tail 40 }
           if (Test-Path "$env:LOCALAPPDATA\dodobe-companion\companion.log") { Get-Content "$env:LOCALAPPDATA\dodobe-companion\companion.log" }
 
-      - uses: actions/upload-artifact@v4
+      - name: Publish the release (v* tags)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $setup = (Get-ChildItem Output\*.exe | Select-Object -First 1).FullName
+          gh release create "${{ github.ref_name }}" "$setup" --repo "${{ github.repository }}" `
+            --title "dodobe companion ${{ github.ref_name }}" `
+            --notes "Windows installer for the dodobe companion tray app (Windows 10/11, x64; no admin rights needed). Run it, enter your Dodobe name and password, press Find folders, and tick the network folders to keep as drives. Built and tested by this run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      # Also kept as the run's artifact for 30 days (best effort: the account's artifact storage can be full).
+      - uses: actions/upload-artifact@v5
+        continue-on-error: true
         with:
           name: dodobe-companion-setup-${{ env.COMPANION_APP_VERSION }}
           path: companion/Output/*.exe
           retention-days: 30
-
-  release:
-    if: github.ref_type == 'tag'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Publish the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${{ github.ref_name }}" dist/*.exe --repo "${{ github.repository }}" \
-            --title "dodobe companion ${{ github.ref_name }}" \
-            --notes "Windows installer for the dodobe companion tray app. Run it, sign in with your Dodobe name and password, pick the network folders to keep as drives."
