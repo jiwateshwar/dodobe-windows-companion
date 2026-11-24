@@ -1,0 +1,138 @@
+# Builds the dodobe companion's Windows installer and tests it on a Windows runner:
+#   1. the settings logic, and the drive mapping against a real SMB share on the runner;
+#   2. the tray app frozen with PyInstaller, packaged with Inno Setup;
+#   3. the installer run silently: files, Start menu, start-at-sign-in entry, the app starting and
+#      staying up; then uninstalled silently, and checked that it all went.
+# The installer is this run's artifact; a v* tag also publishes it as a GitHub release.
+name: Companion installer (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        working-directory: companion
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Version
+        run: |
+          $v = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart("v") } else { "1.0.${{ github.run_number }}" }
+          "COMPANION_APP_VERSION=$v" >> $env:GITHUB_ENV
+          Write-Host "version $v"
+
+      - name: Test the settings logic
+        run: python ..\tests\test_config.py
+
+      - name: Test the drive mapping against a real SMB share
+        run: |
+          $user = "dodobetest"
+          $pw = "Cmp-" + [guid]::NewGuid().ToString("N").Substring(0, 16) + "!a1"
+          net user $user $pw /add /y | Out-Null
+          New-Item -ItemType Directory -Force C:\dodobe-share | Out-Null
+          icacls C:\dodobe-share /grant "${user}:(OI)(CI)M" | Out-Null
+          New-SmbShare -Name "Library" -Path C:\dodobe-share -FullAccess $user -Description "Culled photos" | Out-Null
+          Get-SmbShare | Format-Table Name, Path, Description
+          python ..\tests\windows_smb_test.py Library $user $pw
+          if ($LASTEXITCODE -ne 0) { throw "the SMB test failed" }
+
+      - name: Freeze the tray app
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pyinstaller==6.11.1 -r requirements.txt
+          python -m PyInstaller --noconfirm --clean dodobe-companion.spec
+          if (-not (Test-Path dist\dodobe-companion\dodobe-companion.exe)) { throw "PyInstaller made no exe" }
+          if (-not (Test-Path dist\dodobe-companion\_internal\pystray\__init__.py)) { throw "pystray isn't kept as plain files" }
+
+      - name: Build the installer
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y; }
+          & $iscc /O"Output" dodobe-companion.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          Get-ChildItem Output | Format-Table Name, Length
+
+      - name: Install, run and uninstall it
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Check($ok, $what) { if ($ok) { Write-Host "PASS $what" } else { throw "FAIL $what" } }
+          $setup = (Get-ChildItem Output\*.exe | Select-Object -First 1).FullName
+          $app = "$env:LOCALAPPDATA\Programs\dodobe companion"
+          $exe = "$app\dodobe-companion.exe"
+          $run = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          $log = "$env:LOCALAPPDATA\dodobe-companion\companion.log"
+
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG=install.log" -Wait -PassThru
+          Check ($p.ExitCode -eq 0) "the installer exits cleanly (code $($p.ExitCode))"
+          Check (Test-Path $exe) "the app is installed in $app"
+          Check (Test-Path "$app\LICENSES.txt") "LICENSES.txt is installed"
+          Check (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\dodobe companion.lnk") "the Start menu entry is there"
+          $entry = (Get-ItemProperty $run).dodobeCompanion
+          Check ($entry -eq "`"$exe`"") "it starts at sign-in: $entry"
+
+          Start-Process $exe
+          Start-Sleep 12
+          $proc = Get-Process dodobe-companion -ErrorAction SilentlyContinue
+          if (Test-Path $log) { Get-Content $log }
+          Check ($proc) "the app is running after 12 s"
+          Check (-not (Select-String -Path $log -Pattern "stopped|Traceback" -Quiet)) "the log shows no crash"
+
+          $p = Start-Process $exe -PassThru  # a second copy says so and exits; the first keeps running
+          Start-Sleep 5
+          Check ((Get-Process dodobe-companion -ErrorAction SilentlyContinue | Where-Object Id -eq $proc[0].Id)) "the first copy is still running"
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue  # its "already running" box waits for a click
+
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          Check ($p.ExitCode -eq 0) "installing over it (an update) works"
+          Check (Test-Path $exe) "still installed after the update"
+
+          $p = Start-Process "$app\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          Start-Sleep 3
+          Check ($p.ExitCode -eq 0) "the uninstaller exits cleanly"
+          Check (-not (Get-Process dodobe-companion -ErrorAction SilentlyContinue)) "the app was stopped"
+          Check (-not (Test-Path $exe)) "the program is removed"
+          Check (-not (Get-ItemProperty $run).dodobeCompanion) "the start-at-sign-in entry is removed"
+          Check (Test-Path $log) "a silent uninstall keeps the settings and log"
+
+      - name: Logs
+        if: always()
+        run: |
+          if (Test-Path install.log) { Get-Content install.log -Tail 40 }
+          if (Test-Path "$env:LOCALAPPDATA\dodobe-companion\companion.log") { Get-Content "$env:LOCALAPPDATA\dodobe-companion\companion.log" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dodobe-companion-setup-${{ env.COMPANION_APP_VERSION }}
+          path: companion/Output/*.exe
+          retention-days: 30
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/*.exe --repo "${{ github.repository }}" \
+            --title "dodobe companion ${{ github.ref_name }}" \
+            --notes "Windows installer for the dodobe companion tray app. Run it, sign in with your Dodobe name and password, pick the network folders to keep as drives."

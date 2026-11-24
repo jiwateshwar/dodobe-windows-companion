@@ -1,0 +1,14 @@
+dodobe companion
+================
+
+This program is part of dodobe. It includes the following, under their own licences:
+
+- pystray: LGPL-3.0, https://github.com/moses-palmer/pystray. It is installed as plain Python
+  files in _internal\pystray; you may replace them with another build of pystray.
+  Its source: https://github.com/moses-palmer/pystray
+- Pillow: MIT-CMU (HPND) licence, https://github.com/python-pillow/Pillow
+- six (used by pystray): MIT licence, https://github.com/benjaminp/six
+- Python, with Tcl/Tk (tkinter): Python Software Foundation License, https://www.python.org;
+  Tcl/Tk under its BSD-style licence, https://www.tcl.tk/software/tcltk/license.html
+- PyInstaller's bootloader: GPL-2.0 with an exception that allows distributing programs built with it,
+  https://github.com/pyinstaller/pyinstaller
