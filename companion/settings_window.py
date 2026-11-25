@@ -57,6 +57,21 @@ class SettingsWindow:
         ttk.Label(login, foreground="gray", text="Saved in Windows. Leave blank to keep it." if saved else
                   "Kept in Windows' Credential Manager, never in a file.").grid(row=2, column=1, sticky="w", padx=8)
 
+        extra = ttk.LabelFrame(frame, text="Uploads and waking the box", padding=8)
+        extra.pack(fill="x", pady=(0, 8))
+        self.dumpsite = tk.StringVar(value=cfg.dumpsite)
+        self.mac = tk.StringVar(value=cfg.mac)
+        learned = config.load_box().get("mac")
+        ttk.Label(extra, text="Dumpsite folder").grid(row=0, column=0, sticky="w", **PAD)
+        ttk.Entry(extra, textvariable=self.dumpsite, width=34).grid(row=0, column=1, sticky="we", **PAD)
+        ttk.Label(extra, text="Uploads go to its Drop here folder.", foreground="gray").grid(
+            row=1, column=1, sticky="w", padx=8)
+        ttk.Label(extra, text="Network card").grid(row=2, column=0, sticky="w", **PAD)
+        ttk.Entry(extra, textvariable=self.mac, width=34).grid(row=2, column=1, sticky="we", **PAD)
+        ttk.Label(extra, foreground="gray", text=f"Blank: the one seen while the box was on ({learned})." if learned
+                  else "Blank: learned while the box is on (or type its MAC address).").grid(
+            row=3, column=1, sticky="w", padx=8)
+
         folders = ttk.LabelFrame(frame, text="Network folders as drives", padding=8)
         folders.pack(fill="both", expand=True, pady=(0, 8))
         top = ttk.Frame(folders)
@@ -127,7 +142,8 @@ class SettingsWindow:
     def read(self) -> Config:
         drives = [Drive(r["name"], r["letter"].get()) for r in self.rows.values() if r["on"].get()]
         return Config(host=self.host.get().strip(), home_url=self.home.get().strip(),
-                      username=self.user.get().strip().lower(), drives=drives)
+                      username=self.user.get().strip().lower(), drives=drives,
+                      dumpsite=self.dumpsite.get().strip(), mac=config.normal_mac(self.mac.get()) or self.mac.get().strip())
 
     def find(self) -> None:
         cfg = self.read()
@@ -140,7 +156,7 @@ class SettingsWindow:
     def save(self) -> None:
         new = self.read()
         problems = config.validate(new)
-        if new.drives and not new.username:
+        if (new.drives or self.password.get()) and not new.username:
             problems.append("Enter your Dodobe name: the network folders open with your Dodobe login.")
         if problems:
             self.say("\n".join(problems))

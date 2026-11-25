@@ -5,7 +5,8 @@ a = Analysis(
     ["dodobe_companion.pyw"],
     pathex=["."],
     datas=[("icon.png", "."), ("icon.ico", ".")],
-    hiddenimports=["config", "keeper", "winnet", "settings_window", "pystray._win32"],
+    hiddenimports=["config", "keeper", "winnet", "settings_window", "uploads_window", "uploader", "studio", "wol",
+                   "pystray._win32"],
     module_collection_mode={"pystray": "py"},
 )
 pyz = PYZ(a.pure)

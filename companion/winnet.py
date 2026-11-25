@@ -258,3 +258,108 @@ def single_instance(name: str) -> bool:
     global _mutex
     _mutex = kernel32.CreateMutexW(None, False, "Local\\" + name)
     return ctypes.get_last_error() != ERROR_ALREADY_EXISTS
+
+
+# ---- the studio sign-in (a credential the app may read back) ---------------------------------------
+# Windows never hands back the file-sharing credential above; restarting and shutting down sign in
+# to the studio, which needs the password itself. It's kept as a generic credential: readable only
+# by this Windows account, like any app's saved sign-in.
+
+CRED_TYPE_GENERIC = 1
+
+
+def _studio_target(host: str) -> str:
+    return f"dodobe-companion:studio:{host.lower()}"
+
+
+def save_studio_login(host: str, username: str, password: str) -> None:
+    blob = password.encode("utf-16-le")
+    buf = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
+    cred = CREDENTIALW(Type=CRED_TYPE_GENERIC, TargetName=_studio_target(host), UserName=username,
+                       CredentialBlobSize=len(blob), CredentialBlob=ctypes.cast(buf, ctypes.POINTER(ctypes.c_ubyte)),
+                       Persist=CRED_PERSIST_ENTERPRISE, Comment="dodobe companion: restart and shut down")
+    if not advapi32.CredWriteW(ctypes.byref(cred), 0):
+        raise NetError(ctypes.get_last_error())
+
+
+def studio_login(host: str) -> tuple[str, str] | None:
+    pcred = ctypes.POINTER(CREDENTIALW)()
+    if not advapi32.CredReadW(_studio_target(host), CRED_TYPE_GENERIC, 0, ctypes.byref(pcred)):
+        return None
+    try:
+        c = pcred.contents
+        blob = ctypes.string_at(c.CredentialBlob, c.CredentialBlobSize) if c.CredentialBlobSize else b""
+        return c.UserName or "", blob.decode("utf-16-le")
+    finally:
+        advapi32.CredFree(pcred)
+
+
+def delete_studio_login(host: str) -> None:
+    advapi32.CredDeleteW(_studio_target(host), CRED_TYPE_GENERIC, 0)
+
+
+# ---- the box's network card (for waking it) ----------------------------------------------------------
+
+iphlpapi = ctypes.WinDLL("iphlpapi", use_last_error=True)
+iphlpapi.SendARP.argtypes = [wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, ctypes.POINTER(wintypes.ULONG)]
+
+
+def box_address(host: str) -> tuple[str, str] | None:
+    """The box's IPv4 address and its network card's address (MAC), while it's on: (ip, mac), or None
+    when it doesn't answer or isn't on this network (a MAC is only seen on the same network)."""
+    try:
+        ip = socket.gethostbyname(host)
+    except OSError:
+        return None
+    dest = int.from_bytes(socket.inet_aton(ip), "little")
+    mac = (ctypes.c_ubyte * 8)()
+    length = wintypes.ULONG(8)
+    if iphlpapi.SendARP(dest, 0, ctypes.byref(mac), ctypes.byref(length)) != NO_ERROR or length.value != 6:
+        return None
+    return ip, ":".join(f"{b:02x}" for b in mac[:6])
+
+
+# ---- reading a file from the box, not from Windows' cache -----------------------------------------
+# Checking an upload means reading back what the box has on its disk. Windows' file-sharing client
+# may answer a read from its own cache of what was just written, so the check reads unbuffered.
+
+GENERIC_READ = 0x80000000
+FILE_SHARE_READ = 0x1
+OPEN_EXISTING = 3
+FILE_FLAG_NO_BUFFERING = 0x20000000
+FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
+MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE = 0x1000, 0x2000, 0x8000, 0x04
+INVALID_HANDLE = wintypes.HANDLE(-1).value
+CHUNK = 4 * 1024 * 1024  # a multiple of every sector size, as unbuffered reads need
+
+kernel32.CreateFileW.argtypes = [LPCWSTR, DWORD, DWORD, ctypes.c_void_p, DWORD, DWORD, wintypes.HANDLE]
+kernel32.CreateFileW.restype = wintypes.HANDLE
+kernel32.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, DWORD, ctypes.POINTER(DWORD), ctypes.c_void_p]
+kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+kernel32.VirtualAlloc.argtypes = [ctypes.c_void_p, ctypes.c_size_t, DWORD, DWORD]
+kernel32.VirtualAlloc.restype = ctypes.c_void_p
+kernel32.VirtualFree.argtypes = [ctypes.c_void_p, ctypes.c_size_t, DWORD]
+
+
+def read_unbuffered(path: str, stop=None):
+    """Yield the file's bytes as the server has them, in chunks. Raises OSError like open() does."""
+    h = kernel32.CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, None, OPEN_EXISTING,
+                             FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN, None)
+    if h == INVALID_HANDLE:
+        code = ctypes.get_last_error()
+        raise OSError(None, ctypes.FormatError(code).strip(), path, code)
+    buf = kernel32.VirtualAlloc(None, CHUNK, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)  # page-aligned
+    try:
+        while True:
+            if stop is not None and stop.is_set():
+                return
+            got = DWORD(0)
+            if not kernel32.ReadFile(h, buf, CHUNK, ctypes.byref(got), None):
+                code = ctypes.get_last_error()
+                raise OSError(None, ctypes.FormatError(code).strip(), path, code)
+            if got.value == 0:
+                return
+            yield ctypes.string_at(buf, got.value)
+    finally:
+        kernel32.VirtualFree(buf, 0, MEM_RELEASE)
+        kernel32.CloseHandle(h)

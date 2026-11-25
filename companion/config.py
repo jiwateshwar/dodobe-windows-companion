@@ -15,6 +15,8 @@ DEFAULT_HOST = "dodobe"
 HOST = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?$")       # a name or an IPv4 address
 SHARE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,39}$")                   # as the NAS allows (dodobe_agent.py)
 LOGIN = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,27}$")                          # a Dodobe username
+MAC = re.compile(r"^([0-9A-Fa-f]{2}[:-]?){5}[0-9A-Fa-f]{2}$")
+DEFAULT_DUMPSITE = "Dumpsite"
 LETTERS = [c for c in string.ascii_uppercase if c >= "D"]                    # A-C are floppies and the system drive
 PREFERRED = {"library": "L", "dumpsite": "M", "by species": "S", "pool": "P"}  # Dumpsite: M, as D is usually taken
 
@@ -39,6 +41,8 @@ class Config:
     home_url: str = ""          # empty: http://<host>
     username: str = ""
     drives: list[Drive] = field(default_factory=list)
+    dumpsite: str = DEFAULT_DUMPSITE   # the network folder uploads go to (its "Drop here" folder)
+    mac: str = ""                      # the box's network card, for waking it; empty: the one learned
 
     @property
     def homepage(self) -> str:
@@ -46,6 +50,11 @@ class Config:
 
     def unc(self, share: str) -> str:
         return rf"\\{self.host}\{share}"
+
+    @property
+    def studio(self) -> str:
+        """The studio on the local network (the box's gateway), for restart and shut-down."""
+        return f"http://{self.host}"
 
     @property
     def configured(self) -> bool:
@@ -61,6 +70,10 @@ def validate(cfg: Config) -> list[str]:
         problems.append("The homepage starts with http:// or https://.")
     if cfg.username and not LOGIN.match(cfg.username):
         problems.append("Your Dodobe name is up to 28 lower-case letters, digits, dots, dashes or underscores.")
+    if not SHARE.match(cfg.dumpsite or ""):
+        problems.append("Uploads need the name of Dodobe's dumpsite network folder (usually Dumpsite).")
+    if cfg.mac and not MAC.match(cfg.mac.strip()):
+        problems.append("The network card address looks like 00:1A:2B:3C:4D:5E.")
     letters, shares = set(), set()
     for d in cfg.drives:
         if not SHARE.match(d.share):
@@ -103,7 +116,8 @@ def load(path: Path | None = None) -> Config:
     drives = [Drive(str(d.get("share", "")), str(d.get("letter", "")).upper()[:1])
               for d in raw.get("drives") or [] if isinstance(d, dict)]
     return Config(host=str(raw.get("host") or DEFAULT_HOST), home_url=str(raw.get("home_url") or ""),
-                  username=str(raw.get("username") or ""), drives=drives)
+                  username=str(raw.get("username") or ""), drives=drives,
+                  dumpsite=str(raw.get("dumpsite") or DEFAULT_DUMPSITE), mac=str(raw.get("mac") or ""))
 
 
 def save(cfg: Config, path: Path | None = None) -> None:
@@ -111,4 +125,28 @@ def save(cfg: Config, path: Path | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(asdict(cfg), indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def normal_mac(mac: str) -> str:
+    """00:1a:2b:3c:4d:5e, from any of the usual ways of writing it."""
+    digits = re.sub(r"[^0-9A-Fa-f]", "", mac)
+    return ":".join(digits[i:i + 2] for i in range(0, 12, 2)).lower() if len(digits) == 12 else ""
+
+
+def load_box(path: Path | None = None) -> dict:
+    """What the companion learned about the box while it was on: {"mac": ..., "ip": ...}."""
+    path = path or data_dir() / "box.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_box(box: dict, path: Path | None = None) -> None:
+    path = path or data_dir() / "box.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(box, indent=2), encoding="utf-8")
     os.replace(tmp, path)

@@ -72,6 +72,7 @@ def apply(old: Config, new: Config, password: str | None) -> list[DriveState]:
             raise winnet.NetError(winnet.ERROR_LOGON_FAILURE)
         sign_out(new.host)
         winnet.save_credential(new.host, new.username, password)
+        winnet.save_studio_login(new.host, new.username, password)  # for restart and shut-down
         log.info("saved the network login %s for %s", new.username, new.host)
     return ensure(new, password if login_changed else None)
 
@@ -117,5 +118,6 @@ def forget(cfg: Config) -> None:
             log.warning("couldn't disconnect %s: %s", d.local, exc)
     try:
         winnet.delete_credential(cfg.host)
+        winnet.delete_studio_login(cfg.host)
     except winnet.NetError as exc:
         log.warning("couldn't remove the saved login: %s", exc)

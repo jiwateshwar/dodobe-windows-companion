@@ -1,5 +1,6 @@
 # Builds the dodobe companion's Windows installer and tests it on a Windows runner:
-#   1. the settings logic, and the drive mapping against a real SMB share on the runner;
+#   1. the logic (settings, uploads, wake-up, studio), then drive mapping and an upload with the
+#      share pulled away mid-file, against a real SMB share on the runner;
 #   2. the tray app frozen with PyInstaller, packaged with Inno Setup;
 #   3. the installer run silently: files, Start menu, start-at-sign-in entry, the app starting and
 #      staying up; then uninstalled silently, and checked that it all went.
@@ -34,15 +35,19 @@ jobs:
           "COMPANION_APP_VERSION=$v" >> $env:GITHUB_ENV
           Write-Host "version $v"
 
-      - name: Test the settings logic
-        run: python ..\tests\test_config.py
+      - name: Test the settings, uploads, wake-up and studio logic
+        run: |
+          python ..\tests\test_config.py
+          if ($LASTEXITCODE -ne 0) { throw "test_config failed" }
+          python ..\tests\test_features.py
+          if ($LASTEXITCODE -ne 0) { throw "test_features failed" }
 
       - name: Test the drive mapping against a real SMB share
         run: |
           $user = "dodobetest"
           $pw = "Cmp-" + [guid]::NewGuid().ToString("N").Substring(0, 16) + "!a1"
           net user $user $pw /add /y | Out-Null
-          New-Item -ItemType Directory -Force C:\dodobe-share | Out-Null
+          New-Item -ItemType Directory -Force "C:\dodobe-share\Drop here" | Out-Null
           icacls C:\dodobe-share /grant "${user}:(OI)(CI)M" | Out-Null
           New-SmbShare -Name "Library" -Path C:\dodobe-share -FullAccess $user -Description "Culled photos" | Out-Null
           Get-SmbShare | Format-Table Name, Path, Description
