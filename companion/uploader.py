@@ -36,6 +36,10 @@ JUNK_NAMES = {".ds_store", "thumbs.db", "desktop.ini"}
 COPY_CHUNK = 1024 * 1024
 TRIES = 3            # sends of one file that arrive damaged before the upload gives up
 SAME_FAILURE = 3     # the same step failing this often in a row: send the file afresh (or check it plainly)
+# Errors that only mean the box or its share can't be reached (the network is down, the share is
+# gone for now, the connection was cut): waited out, never counted as a step that keeps failing.
+GONE = {53, 59, 64, 67, 121, 240, 1203, 1222, 1231, 1232, 1236,
+        errno.EBADF, errno.ECONNRESET, errno.ECONNABORTED, errno.ETIMEDOUT, errno.EHOSTUNREACH, errno.ENETUNREACH}
 WAIT_STEP = 1.0      # seconds between looks at the network (and at Pause/Cancel) while waiting
 ACTIVE = ("queued", "copying", "waiting", "verifying", "moving")
 FINISHED = ("done", "failed", "cancelled")
@@ -144,6 +148,7 @@ class Uploader:
         self.progress: dict[str, int] = {}        # job id -> bytes there (done files + the current one)
         self.rate: dict[str, float] = {}          # job id -> bytes per second
         self.plain_check: set[str] = set()        # jobs whose box can't be read back unbuffered
+        self.sent: dict[str, int] = {}            # job id -> bytes written to the box (resends included)
         self.stopping = False
         self.thread: threading.Thread | None = None
         self._load()
@@ -289,7 +294,8 @@ class Uploader:
                         self._file(job, item, opts)
                         break
                     except DestError as exc:
-                        fails.append((exc.where, exc.code))
+                        if exc.code not in GONE:  # the box answers, yet this step keeps failing
+                            fails.append((exc.where, exc.code))
                         if len(fails) >= SAME_FAILURE and len(set(fails[-SAME_FAILURE:])) == 1:
                             if exc.where == "checking" and not opts["plain"]:
                                 opts["plain"] = True  # the unbuffered read is what fails: read it the usual way
@@ -449,6 +455,7 @@ class Uploader:
                         break  # shorter than it was: the size check catches it next time
                     self._dest(fout.write, chunk)
                     pos += len(chunk)
+                    self.sent[job.id] = self.sent.get(job.id, 0) + len(chunk)
                     self.progress[job.id] = done_before + pos
                     now = time.monotonic()
                     if now - window_t >= 1:

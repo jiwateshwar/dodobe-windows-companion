@@ -133,6 +133,8 @@ waits = [m for st, m in states if st == "waiting"]
 print("waits:", waits[:3], flush=True)
 check(any("BIG_0001" in m for m in waits), "it waited in the middle of the big file while the share was gone")
 check(not up.plain_check, "every checksum was read back unbuffered")
+print("bytes sent:", up.sent.get(job.id), "for", job.total, flush=True)
+check(up.sent.get(job.id, 0) < job.total * 1.1, "it carried on from where the box's copy ended (not from the start)")
 final = Path(job.final)
 check(final.parent.name == uploader.DROP and final.name == src_root.name, f"it landed in {final}")
 for rel in ("Day 1/BIG_0001.NEF", "Day 1/DSC_0002.JPG"):

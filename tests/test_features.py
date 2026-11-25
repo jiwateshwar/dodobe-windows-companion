@@ -99,6 +99,7 @@ def test_a_dropped_connection_is_waited_out_and_resumed():
         assert sent["drops"] == 1 and "waiting" in states
         assert checks["n"] >= 3
         assert sent["bytes"] < job.total * 1.2  # carried on; not sent again from the start
+        assert up.sent[job.id] == sent["bytes"]
         same_tree(src, dump / uploader.DROP / src.name)
 
 
