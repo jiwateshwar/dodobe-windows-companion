@@ -105,8 +105,8 @@ odd.rmdir()
 states = []
 up = uploader.Uploader(Path(tempfile.mkdtemp()), online=lambda: winnet.reachable(HOST),
                        reader=winnet.read_unbuffered, machine="CI", wait_step=0.2)
-up.on_change = lambda: states.append((job.state, job.message)) if up.jobs else None
 job = up.add(src_root, dest)
+up.on_change = lambda: states.append((job.state, job.message))
 worker = threading.Thread(target=up.run, args=(job,))
 worker.start()
 deadline = time.monotonic() + 120
