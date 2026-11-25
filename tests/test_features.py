@@ -136,11 +136,11 @@ def test_it_carries_on_after_the_app_restarts():
         real = up._file
         calls = []
 
-        def quit_after_one(job_, item):
+        def quit_after_one(job_, item, *opts):
             if calls:
                 up.stopping = True  # the app quits while the second file is going
             calls.append(item.rel)
-            real(job_, item)
+            real(job_, item, *opts)
         up._file = quit_after_one
         up.run(job)
         assert job.state == "queued" and sum(i.done for i in job.items) == 1
@@ -155,6 +155,25 @@ def test_it_carries_on_after_the_app_restarts():
         assert job2.state == "done", job2.message
         same_tree(src, dump / uploader.DROP / src.name)
         assert (dump / uploader.DROP / src.name / first.rel).stat().st_mtime_ns == mtime  # not sent twice
+
+
+def test_the_same_failure_over_and_over_changes_approach():
+    with tempfile.TemporaryDirectory() as d:
+        calls = {"n": 0}
+
+        def unbuffered_broken(path, stop=None):
+            calls["n"] += 1
+            raise OSError(errno.EINVAL, "The parameter is incorrect")
+            yield b""
+        src, dump, up = setup(Path(d), reader=unbuffered_broken)
+        job = up.add(src, str(dump))
+        messages = []
+        up.on_change = lambda: messages.append(job.message)
+        up.run(job)
+        assert job.state == "done", job.message
+        assert calls["n"] == 3  # three times for the first file, then the normal read for every file
+        assert any("checking" in m and "error" in m for m in messages)  # the wait names the step
+        same_tree(src, dump / uploader.DROP / src.name)
 
 
 def test_names_photographers_pause_and_cancel():

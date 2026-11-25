@@ -69,8 +69,12 @@ import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
 
+import logging  # noqa: E402
+
 import uploader  # noqa: E402
 import wol  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format="  log %(name)s: %(message)s", force=True)
 
 dest = cfg.unc(share)
 src_root = Path(tempfile.mkdtemp()) / "Trip 2026-11"
@@ -94,14 +98,21 @@ up.on_change = lambda: states.append(up.snapshot()[0]["state"]) if up.jobs else 
 job = up.add(src_root, dest)
 worker = threading.Thread(target=up.run, args=(job,))
 worker.start()
-while up.progress.get(job.id, 0) < job.total * 0.2 and worker.is_alive():
+deadline = time.monotonic() + 120
+while up.progress.get(job.id, 0) < job.total * 0.2 and worker.is_alive() and time.monotonic() < deadline:
     time.sleep(0.05)
+check(worker.is_alive(), f"the upload is under way ({job.state}: {job.message})")
 print("pulling the share away at", up.progress.get(job.id), "of", job.total, flush=True)
 ps = ["powershell", "-NoProfile", "-Command"]
-subprocess.run(ps + ["Remove-SmbShare -Name Library -Force"], check=True)
+subprocess.run(ps + ["Remove-SmbShare -Name Library -Force"], check=True, timeout=60)
 time.sleep(8)
-subprocess.run(ps + [f"New-SmbShare -Name Library -Path C:\\dodobe-share -FullAccess {user} | Out-Null"], check=True)
-worker.join(600)
+subprocess.run(ps + [f"New-SmbShare -Name Library -Path C:\\dodobe-share -FullAccess {user} | Out-Null"], check=True,
+               timeout=60)
+print("the share is back", flush=True)
+worker.join(300)
+if worker.is_alive():
+    up.cancel(job.id)  # don't leave the test hanging: say what it was doing, then stop
+    worker.join(60)
 print("upload:", job.state, job.message, flush=True)
 check(job.state == "done", "the upload finished after the share came back")
 check("waiting" in states, "it waited while the share was gone")

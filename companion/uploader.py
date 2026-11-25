@@ -35,6 +35,7 @@ STAGING = ".companion-uploads"
 JUNK_NAMES = {".ds_store", "thumbs.db", "desktop.ini"}
 COPY_CHUNK = 1024 * 1024
 TRIES = 3            # sends of one file that arrive damaged before the upload gives up
+SAME_FAILURE = 3     # the same step failing this often in a row: send the file afresh (or check it plainly)
 WAIT_STEP = 1.0      # seconds between looks at the network (and at Pause/Cancel) while waiting
 ACTIVE = ("queued", "copying", "waiting", "verifying", "moving")
 FINISHED = ("done", "failed", "cancelled")
@@ -50,6 +51,10 @@ class Failed(Exception):
 
 class DestError(Exception):
     """The box went away (or something like it): wait, then carry on."""
+
+    def __init__(self, message: str, where: str = "", code=None):
+        super().__init__(message)
+        self.where, self.code = where, code
 
 
 @dataclass
@@ -138,6 +143,7 @@ class Uploader:
         self.control: dict[str, str] = {}         # job id -> "pause" | "cancel"
         self.progress: dict[str, int] = {}        # job id -> bytes there (done files + the current one)
         self.rate: dict[str, float] = {}          # job id -> bytes per second
+        self.plain_check: set[str] = set()        # jobs whose box can't be read back unbuffered
         self.stopping = False
         self.thread: threading.Thread | None = None
         self._load()
@@ -276,11 +282,25 @@ class Uploader:
             for item in job.items:
                 if item.done or item.missing:
                     continue
+                opts = {"fresh": False, "plain": job.id in self.plain_check}
+                fails: list = []
                 while True:
                     try:
-                        self._file(job, item)
+                        self._file(job, item, opts)
                         break
                     except DestError as exc:
+                        fails.append((exc.where, exc.code))
+                        if len(fails) >= SAME_FAILURE and len(set(fails[-SAME_FAILURE:])) == 1:
+                            if exc.where == "checking" and not opts["plain"]:
+                                opts["plain"] = True  # the unbuffered read is what fails: read it the usual way
+                                self.plain_check.add(job.id)  # for the rest of this upload too
+                                log.warning("%s: %s: reading back unbuffered keeps failing (%s); checking it "
+                                            "with a normal read", job.id, item.rel, exc)
+                            else:
+                                opts["fresh"] = True
+                                log.warning("%s: %s: the same step keeps failing (%s); sending it afresh",
+                                            job.id, item.rel, exc)
+                            fails.clear()
                         self._wait(job, str(exc))
             while True:
                 try:
@@ -335,13 +355,26 @@ class Uploader:
         try:
             return fn(*args)
         except OSError as exc:
-            reason = _permanent(exc)
-            if reason:
-                raise Failed(reason) from exc
-            raise DestError(exc.strerror or str(exc)) from exc
+            raise self._error(exc) from exc
 
-    def _file(self, job: Job, item: Item) -> None:
+    def _error(self, exc: OSError) -> Exception:
+        reason = _permanent(exc)
+        if reason:
+            return Failed(reason)
+        code = getattr(exc, "winerror", None) or exc.errno
+        where, rel = self.where
+        log.info("%s %s: %r", where, rel, exc)
+        return DestError(f"{exc.strerror or exc} ({where} {rel}, error {code})", where, code)
+
+    where = ("preparing", "")
+
+    def _at(self, step: str, rel: str) -> None:
+        self.where = (step, rel)
+
+    def _file(self, job: Job, item: Item, opts: dict | None = None) -> None:
+        opts = opts if opts is not None else {"fresh": False, "plain": False}
         check = self._check()
+        self._at("preparing", item.rel)
         src, dst = Path(job.source) / item.rel, job.staging / item.rel
         done_before = sum(i.size for i in job.items if i.done)
         for attempt in range(1, TRIES + 1):
@@ -360,6 +393,9 @@ class Uploader:
                 self._dest(lambda: dst.unlink(missing_ok=True))
                 self._save(job)
             self._dest(lambda: dst.parent.mkdir(parents=True, exist_ok=True))
+            if opts["fresh"]:
+                self._dest(lambda: dst.unlink(missing_ok=True))
+                opts["fresh"] = False
             have = self._dest(lambda: dst.stat().st_size if dst.exists() else 0)
             if have > item.size:
                 self._dest(dst.unlink)
@@ -375,8 +411,11 @@ class Uploader:
                 self._save(job)
             job.message = f"Checking {item.rel}"
             self.on_change()
+            self._at("checking", item.rel)
             there = self._dest(lambda: dst.stat().st_size)
-            theirs = self._sha(job, lambda: self.reader(str(dst)), local=False) if there == item.size else ""
+            reader = _plain_reader if opts["plain"] else self.reader
+            theirs = self._sha(job, lambda: reader(str(dst)), local=False) if there == item.size else ""
+            self._at("preparing", item.rel)
             if theirs == item.sha256:
                 item.done = True
                 self._save(job)
@@ -394,9 +433,11 @@ class Uploader:
             return  # gone meanwhile: the next look marks it missing
         with fin:
             fin.seek(offset)
+            self._at("opening", dst.name)
             fout = self._dest(open, dst, "r+b" if offset else "wb")
             try:
                 self._dest(fout.seek, offset)
+                self._at("writing", dst.name)
                 pos = offset
                 while pos < size:
                     check(job)
@@ -414,6 +455,7 @@ class Uploader:
                         self.rate[job.id] = (pos - window_b) / (now - window_t)
                         window_t, window_b = now, pos
                         self.on_change()
+                self._at("flushing", dst.name)
                 self._dest(fout.flush)
                 self._dest(os.fsync, fout.fileno())  # on the box's disk before it's checked
             finally:
@@ -434,10 +476,7 @@ class Uploader:
         except OSError as exc:
             if local:
                 raise DestError(f"can't read a file on this PC ({exc.strerror})") from exc
-            reason = _permanent(exc)
-            if reason:
-                raise Failed(reason) from exc
-            raise DestError(exc.strerror or str(exc)) from exc
+            raise self._error(exc) from exc
         return h.hexdigest()
 
     def _move(self, job: Job) -> None:
@@ -447,6 +486,7 @@ class Uploader:
             drop = drop / job.photographer
         if job.final and self._dest(lambda: Path(job.final).exists() and not job.staging.exists()):
             return  # moved already (the app stopped just after)
+        self._at("moving", job.name)
         job.state, job.message = "moving", "Putting it in Drop here"
         self._save(job)
         self.on_change()
