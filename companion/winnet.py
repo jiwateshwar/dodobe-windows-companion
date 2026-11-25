@@ -341,8 +341,19 @@ kernel32.VirtualAlloc.restype = ctypes.c_void_p
 kernel32.VirtualFree.argtypes = [ctypes.c_void_p, ctypes.c_size_t, DWORD]
 
 
+kernel32.GetFileSizeEx.argtypes = [wintypes.HANDLE, ctypes.POINTER(ctypes.c_longlong)]
+SECTOR = 4096
+tail_fallbacks = 0  # how often a file's last piece had to be read the usual way (tests look)
+
+
 def read_unbuffered(path: str, stop=None):
-    """Yield the file's bytes as the server has them, in chunks. Raises OSError like open() does."""
+    """Yield the file's bytes as the server has them, in chunks. Raises OSError like open() does.
+
+    Each read asks only for what the file still holds, rounded up to whole sectors: over SMB, an
+    unbuffered read that reaches well past the end fails ("The parameter is incorrect"), though the
+    same read of a local file doesn't. Should even that fail for the last piece, the few bytes left
+    are read the usual way."""
+    global tail_fallbacks
     h = kernel32.CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, None, OPEN_EXISTING,
                              FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN, None)
     if h == INVALID_HANDLE:
@@ -350,15 +361,30 @@ def read_unbuffered(path: str, stop=None):
         raise OSError(None, ctypes.FormatError(code).strip(), path, code)
     buf = kernel32.VirtualAlloc(None, CHUNK, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)  # page-aligned
     try:
-        while True:
+        size = ctypes.c_longlong(0)
+        if not kernel32.GetFileSizeEx(h, ctypes.byref(size)):
+            code = ctypes.get_last_error()
+            raise OSError(None, ctypes.FormatError(code).strip(), path, code)
+        pos = 0
+        while pos < size.value:
             if stop is not None and stop.is_set():
                 return
+            left = size.value - pos
+            want = min(CHUNK, -(-left // SECTOR) * SECTOR)
             got = DWORD(0)
-            if not kernel32.ReadFile(h, buf, CHUNK, ctypes.byref(got), None):
+            if not kernel32.ReadFile(h, buf, want, ctypes.byref(got), None):
                 code = ctypes.get_last_error()
+                if code == 87 and left < CHUNK:  # the last piece: read the rest the usual way
+                    tail_fallbacks += 1
+                    with open(path, "rb") as f:
+                        f.seek(pos)
+                        rest = f.read(left)
+                    yield rest
+                    return
                 raise OSError(None, ctypes.FormatError(code).strip(), path, code)
             if got.value == 0:
                 return
+            pos += got.value
             yield ctypes.string_at(buf, got.value)
     finally:
         kernel32.VirtualFree(buf, 0, MEM_RELEASE)

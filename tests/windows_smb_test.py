@@ -90,11 +90,22 @@ chunks = list(winnet.read_unbuffered(str(big)))
 check(hashlib.sha256(b"".join(chunks)).hexdigest() == hashlib.sha256(big.read_bytes()).hexdigest(),
       "read_unbuffered reads a whole file")
 del chunks
+odd = Path(dest) / "odd sizes"
+odd.mkdir(exist_ok=True)
+for n in (0, 1, 511, 4095, 4096, 4097, 300_000, 4 * 1024 * 1024, 4 * 1024 * 1024 + 1, 9 * 1024 * 1024 + 7):
+    data = os.urandom(n)
+    (odd / f"{n}.bin").write_bytes(data)
+    check(b"".join(winnet.read_unbuffered(str(odd / f"{n}.bin"))) == data, f"read_unbuffered over SMB: {n} bytes")
+print("last pieces read the usual way:", winnet.tail_fallbacks, flush=True)
+check(winnet.tail_fallbacks == 0, "every size is read back unbuffered over SMB")
+for f in odd.iterdir():
+    f.unlink()
+odd.rmdir()
 
 states = []
 up = uploader.Uploader(Path(tempfile.mkdtemp()), online=lambda: winnet.reachable(HOST),
                        reader=winnet.read_unbuffered, machine="CI", wait_step=0.2)
-up.on_change = lambda: states.append(up.snapshot()[0]["state"]) if up.jobs else None
+up.on_change = lambda: states.append((job.state, job.message)) if up.jobs else None
 job = up.add(src_root, dest)
 worker = threading.Thread(target=up.run, args=(job,))
 worker.start()
@@ -104,7 +115,10 @@ while up.progress.get(job.id, 0) < job.total * 0.2 and worker.is_alive() and tim
 check(worker.is_alive(), f"the upload is under way ({job.state}: {job.message})")
 print("pulling the share away at", up.progress.get(job.id), "of", job.total, flush=True)
 ps = ["powershell", "-NoProfile", "-Command"]
-subprocess.run(ps + ["Remove-SmbShare -Name Library -Force"], check=True, timeout=60)
+import ctypes  # noqa: E402
+
+code = ctypes.WinDLL("netapi32").NetShareDel(None, "Library", 0)  # at once (PowerShell takes seconds to start)
+check(code == 0, f"the share is pulled away mid-file (NetShareDel {code})")
 time.sleep(8)
 subprocess.run(ps + [f"New-SmbShare -Name Library -Path C:\\dodobe-share -FullAccess {user} | Out-Null"], check=True,
                timeout=60)
@@ -115,7 +129,10 @@ if worker.is_alive():
     worker.join(60)
 print("upload:", job.state, job.message, flush=True)
 check(job.state == "done", "the upload finished after the share came back")
-check("waiting" in states, "it waited while the share was gone")
+waits = [m for st, m in states if st == "waiting"]
+print("waits:", waits[:3], flush=True)
+check(any("BIG_0001" in m for m in waits), "it waited in the middle of the big file while the share was gone")
+check(not up.plain_check, "every checksum was read back unbuffered")
 final = Path(job.final)
 check(final.parent.name == uploader.DROP and final.name == src_root.name, f"it landed in {final}")
 for rel in ("Day 1/BIG_0001.NEF", "Day 1/DSC_0002.JPG"):
